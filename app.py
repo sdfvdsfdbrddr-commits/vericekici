@@ -433,4 +433,4 @@ if __name__ == '__main__':
     # 'debug=True' sunucuda kapalı olmalı
     # 'host='0.0.0.0'' tüm IP'lerden gelen bağlantıları kabul eder (Render için şart)
     print(f"Sunucu http://0.0.0.0:{port} adresinde başlatılıyor...")
-    socketio.run(app, debug=False, host='0.0.0.0', port=port)
+    socketio.run(app, debug=False, host='0.0.0.0', port=port, allow_unsafe_werkzeug=True)
