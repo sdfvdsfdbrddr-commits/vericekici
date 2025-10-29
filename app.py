@@ -17,6 +17,9 @@ from flask_socketio import SocketIO, emit
 api_id = os.environ.get('API_ID')
 api_hash = os.environ.get('API_HASH')
 session_string = os.environ.get('TELETHON_SESSION')
+# Sunucuya yüklediğimizde kalıcı depolama alanı burası olacak
+# Ücretsiz planda bu, sunucu uyandığında sıfırlanan geçici bir klasördür.
+DATA_DIR = os.environ.get('RENDER_DISK_MOUNT_PATH', '.')
 
 # --- Flask ve SocketIO Kurulumu ---
 app = Flask(__name__)
