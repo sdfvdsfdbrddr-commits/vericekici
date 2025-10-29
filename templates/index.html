@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hisse Analiz Platformu</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+
+    <style>
+        /* --- TEMEL STİLLER (Dark Mode) --- */
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #1a1a1a;
+            color: #f0f0f0;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background-color: #2a2a2a;
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.4);
+        }
+
+        /* --- İSTEĞİNİZ: YÜKLENİYOR ANİMASYONU --- */
+        /* Bu, veri çekilirken görünecek */
+        #loader {
+            display: none; /* Başlangıçta gizli */
+            border: 5px solid #444;
+            border-top: 5px solid #3498db; /* Mavi renk */
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* --- KONTROL PANELİ (Girişler, Butonlar) --- */
+        .controls {
+            padding: 20px;
+            border: 1px solid #444;
+            border-radius: 10px;
+        }
+        .controls h3 {
+            margin-top: 0;
+            color: #3498db;
+        }
+        #hisse-input {
+            width: calc(100% - 22px);
+            padding: 10px;
+            font-size: 16px;
+            background-color: #333;
+            color: #fff;
+            border: 1px solid #555;
+            border-radius: 5px;
+        }
+        .checkbox-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin: 15px 0;
+            background-color: #333;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        .checkbox-group label {
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+        }
+        .checkbox-group input {
+            margin-right: 5px;
+        }
+        .main-options { font-weight: bold; color: #5dade2; }
+
+        #fetch-button {
+            width: 100%;
+            padding: 12px;
+            font-size: 16px;
+            font-weight: bold;
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        #fetch-button:hover { background-color: #2980b9; }
+        #fetch-button:disabled {
+            background-color: #555;
+            cursor: not-allowed;
+        }
+
+        /* --- DURUM VE SONUÇ ALANI --- */
+        #status-area {
+            margin-top: 20px;
+            text-align: center;
+        }
+        #status-label { font-style: italic; color: gray; }
+        #duration-label { font-weight: bold; color: #2ecc71; }
+
+        #results-frame {
+            margin-top: 20px;
+        }
+        .separator {
+            height: 2px;
+            background-color: #444;
+            border: 0;
+            margin: 25px 0;
+        }
+
+        /* --- SONUÇ KARTLARI (Derinlik ve Tablolar) --- */
+        .result-card {
+            background-color: #333;
+            border: 1px solid #444;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 20px;
+            overflow-x: auto; /* Tablolar taşarsa kaydırma çubuğu */
+        }
+        .result-card h4 {
+            margin-top: 0;
+            font-size: 18px;
+            color: #f0f0f0;
+        }
+        .result-card .price-info {
+            font-size: 14px;
+            font-weight: bold;
+            color: #1E90FF;
+            margin-bottom: 10px;
+        }
+
+        /* Derinlik Stilleri */
+        .depth-price { color: #f1c40f; font-weight: bold; }
+        .depth-time { font-size: 12px; font-style: italic; color: #999; }
+        .depth-ratio-bar {
+            display: flex;
+            height: 25px;
+            border-radius: 5px;
+            overflow: hidden;
+            background-color: #E74C3C; /* Satış Rengi */
+            margin: 10px 0 5px 0;
+        }
+        .depth-alis-fill {
+            background-color: #2ECC71; /* Alış Rengi */
+            height: 100%;
+            transition: width 0.3s;
+        }
+        .depth-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+        }
+        .depth-labels .alis { color: #2ECC71; font-weight: bold; }
+        .depth-labels .satis { color: #E74C3C; font-weight: bold; }
+
+        /* Tablo Stilleri */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+        th, td {
+            padding: 8px 12px;
+            border: 1px solid #555;
+            text-align: left;
+        }
+        th {
+            background-color: #444;
+            font-size: 13px;
+        }
+        td { font-size: 13px; }
+        tr:nth-child(even) { background-color: #3a3a3a; }
+        td.num-sira { text-align: center; width: 40px; }
+        td.num-data { text-align: right; width: 120px; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <div class="controls">
+            <h3>Hisse Kodlarını Virgülle Ayırarak Girin:</h3>
+            <input type="text" id="hisse-input" placeholder="Örn: THYAO, ASELS, PATEK">
+
+            <div class="checkbox-group" style="margin-top: 20px;">
+                <label class="main-options"><input type="checkbox" id="check-derinlik"> Derinlik</label>
+                <label class="main-options"><input type="checkbox" id="check-fiyat"> Fiyat Verisi</label>
+                <label class="main-options"><input type="checkbox" id="check-akd"> AKD Verileri</label>
+                <label class="main-options"><input type="checkbox" id="check-takas"> Takas Verileri</label>
+            </div>
+
+            <div id="akd-options" class="checkbox-group" style="display: none; padding-left: 30px;">
+                <label><input type="checkbox" class="akd-check" value="Günlük"> Günlük</label>
+                <label><input type="checkbox" class="akd-check" value="3 Günlük"> 3 Günlük</label>
+                <label><input type="checkbox" class="akd-check" value="1 Haftalık"> 1 Haftalık</label>
+                <label><input type="checkbox" class="akd-check" value="2 Haftalık"> 2 Haftalık</label>
+                <label><input type="checkbox" class="akd-check" value="1 Aylık"> 1 Aylık</label>
+                <label><input type="checkbox" class="akd-check" value="3 Aylık"> 3 Aylık</label>
+                <label><input type="checkbox" class="akd-check" value="6 Aylık"> 6 Aylık</label>
+            </div>
+
+            <div id="takas-options" class="checkbox-group" style="display: none; padding-left: 30px;">
+                <label><input type="checkbox" class="takas-check" value="Son Takas"> Son Takas</label>
+                <label><input type="checkbox" class="takas-check" value="3 Günlük"> 3 Günlük</label>
+                <label><input type="checkbox" class="takas-check" value="Haftalık"> Haftalık</label>
+                <label><input type="checkbox" class="takas-check" value="2 Haftalık"> 2 Haftalık</label>
+                <label><input type="checkbox" class="takas-check" value="Aylık"> Aylık</label>
+                <label><input type="checkbox" class="takas-check" value="3 Aylık"> 3 Aylık</label>
+                <label><input type="checkbox" class="takas-check" value="6 Aylık"> 6 Aylık</label>
+            </div>
+
+            <button id="fetch-button">Verileri Getir</button>
+        </div>
+
+        <div id="status-area">
+            <div id="loader"></div>
+            <div id="status-label">Bağlantı bekleniyor...</div>
+            <div id="duration-label"></div>
+        </div>
+
+        <div id="results-frame">
+            </div>
+    </div>
+
+    <script>
+        // --- 1. Elementleri Seçme ---
+        const socket = io(); // Sunucuya bağlan
+        const fetchButton = document.getElementById('fetch-button');
+        const hisseInput = document.getElementById('hisse-input');
+        const statusLabel = document.getElementById('status-label');
+        const durationLabel = document.getElementById('duration-label');
+        const loader = document.getElementById('loader');
+        const resultsFrame = document.getElementById('results-frame');
+
+        // Checkbox'lar
+        const checkAkd = document.getElementById('check-akd');
+        const checkTakas = document.getElementById('check-takas');
+        const akdOptions = document.getElementById('akd-options');
+        const takasOptions = document.getElementById('takas-options');
+
+        // --- 2. Sunucu Bağlantı Olayları ---
+        socket.on('connect', () => {
+            statusLabel.textContent = 'Sunucuya bağlanıldı. Analiz için hazır.';
+            statusLabel.style.color = '#2ecc71'; // Yeşil
+        });
+        socket.on('disconnect', () => {
+            statusLabel.textContent = 'Sunucu bağlantısı koptu!';
+            statusLabel.style.color = '#e74c3c'; // Kırmızı
+            fetchButton.disabled = true;
+        });
+
+        // --- 3. Arayüz Etkileşimleri (Periyotları gösterme/gizleme) ---
+        checkAkd.addEventListener('change', () => {
+            akdOptions.style.display = checkAkd.checked ? 'flex' : 'none';
+        });
+        checkTakas.addEventListener('change', () => {
+            takasOptions.style.display = checkTakas.checked ? 'flex' : 'none';
+        });
+
+        // --- 4. Veri Getirme Butonu ---
+        fetchButton.addEventListener('click', () => {
+            // 1. Girdileri Topla
+            const hisse_input_str = hisseInput.value;
+            if (!hisse_input_str.trim()) {
+                alert('Lütfen en az bir hisse kodu girin.');
+                return;
+            }
+
+            // Seçili AKD periyotlarını al
+            const akd_secilenler = Array.from(document.querySelectorAll('.akd-check:checked'))
+                                        .map(cb => cb.value);
+            // Seçili Takas periyotlarını al
+            const takas_secilenler = Array.from(document.querySelectorAll('.takas-check:checked'))
+                                          .map(cb => cb.value);
+
+            const params = {
+                hisse_input: hisse_input_str,
+                derinlik_secili: document.getElementById('check-derinlik').checked,
+                fiyat_secili: document.getElementById('check-fiyat').checked,
+                akd_secilenler: checkAkd.checked ? akd_secilenler : [],
+                takas_secilenler: checkTakas.checked ? takas_secilenler : []
+            };
+
+            // 2. Arayüzü Sıfırla
+            resultsFrame.innerHTML = ''; // Eski sonuçları temizle
+            statusLabel.textContent = 'İşlemler hazırlanıyor...';
+            durationLabel.textContent = '';
+            loader.style.display = 'block'; // Yükleniyor animasyonunu göster
+            fetchButton.disabled = true; // Butonu kilitle
+            fetchButton.textContent = 'Veri Çekiliyor...';
+
+            // 3. Sunucuya İsteği Gönder
+            socket.emit('start_fetch', params);
+        });
+
+        // --- 5. Sunucudan Gelen Verileri Dinleme ---
+
+        // Durum güncellemelerini alır (örn: "Veri bekleniyor...")
+        socket.on('status_update', (data) => {
+            statusLabel.textContent = data.msg;
+            statusLabel.style.color = data.color || 'gray';
+        });
+
+        // Ayırıcı çizgi ekler (hisseler arası)
+        socket.on('new_separator', () => {
+            resultsFrame.insertAdjacentHTML('beforeend', '<hr class="separator">');
+        });
+
+        // İşlem bittiğinde tetiklenir
+        socket.on('fetch_complete', (data) => {
+            loader.style.display = 'none'; // Yükleniyor animasyonunu gizle
+            fetchButton.disabled = false; // Buton kilidini aç
+            fetchButton.textContent = 'Verileri Getir';
+            statusLabel.textContent = data.status_msg;
+            statusLabel.style.color = '#2ecc71'; // Yeşil
+            durationLabel.textContent = data.duration_msg;
+        });
+
+        // YENİ VERİ GELDİĞİNDE (En önemli kısım)
+        socket.on('new_data', (packet) => {
+            if (packet.type === 'depth') {
+                renderDepth(packet.hisse, packet.data);
+            }
+            else if (packet.type === 'price_only') {
+                renderPriceOnly(packet.data);
+            }
+            else if (packet.type === 'table') {
+                renderTable(packet.title, packet.result_data, packet.data_type, packet.period, packet.price_info);
+            }
+        });
+
+        // --- 6. HTML OLUŞTURMA YARDIMCI FONKSİYONLARI ---
+
+        // Derinlik verisini HTML'e dönüştürür
+        function renderDepth(hisse, data) {
+            if (data.hata && !data.alis_lot) {
+                resultsFrame.insertAdjacentHTML('beforeend', `<div class="result-card" style="color:red;">Hata: ${data.hata}</div>`);
+                return;
+            }
+
+            const alis_lot = data.alis_lot || 0;
+            const satis_lot = data.satis_lot || 0;
+            const toplam_lot = alis_lot + satis_lot;
+            let alis_orani_pct = 0;
+            let alis_orani_str = "0.00%";
+            let satis_orani_str = "0.00%";
+
+            if (toplam_lot > 0) {
+                alis_orani_pct = (alis_lot / toplam_lot);
+                alis_orani_str = (alis_orani_pct * 100).toFixed(2) + '%';
+                satis_orani_str = (100 - (alis_orani_pct * 100)).toFixed(2) + '%';
+            }
+
+            const html = `
+                <div class="result-card">
+                    <h4>--- ${hisse} ANLIK KADEME DERİNLİĞİ ---</h4>
+                    <div class="depth-price">Fiyat: ${data.fiyat || '-'}</div>
+                    <div class="depth-time">Son İşlem: ${data.saat || '-'}</div>
+
+                    ${toplam_lot > 0 ? `
+                        <div class="depth-ratio-bar">
+                            <div class="depth-alis-fill" style="width: ${alis_orani_pct * 100}%;"></div>
+                        </div>
+                        <div class="depth-labels">
+                            <span class="alis">ALIŞ: ${alis_orani_str} (${alis_lot.toLocaleString('tr-TR')})</span>
+                            <span class="satis">SATIŞ: ${satis_orani_str} (${satis_lot.toLocaleString('tr-TR')})</span>
+                        </div>
+                    ` : `
+                        <div style="color:orange; margin-top:10px;">Alış/Satış verisi bulunamadı.</div>
+                    `}
+                </div>
+            `;
+            resultsFrame.insertAdjacentHTML('beforeend', html);
+        }
+
+        // Sadece fiyat verisini HTML'e dönüştürür
+        function renderPriceOnly(data) {
+             if (data.hata) {
+                resultsFrame.insertAdjacentHTML('beforeend', `<div class="result-card" style="color:red;">Hata: ${data.hata}</div>`);
+                return;
+            }
+            const html = `
+                <div class="result-card">
+                    <h4 style="font-size:16px; color: #1E90FF;">${data.price_info || 'Fiyat bilgisi yok'}</h4>
+                </div>
+            `;
+            resultsFrame.insertAdjacentHTML('beforeend', html);
+        }
+
+        // AKD/Takas verisini HTML Tablosuna dönüştürür
+        function renderTable(title, result_data, data_type, period, price_info) {
+            if (result_data.hata && !result_data.data) {
+                resultsFrame.insertAdjacentHTML('beforeend', `<div class="result-card" style="color:red;">Hata: ${result_data.hata}</div>`);
+                return;
+            }
+
+            const structured_data = result_data.data || {};
+            if (!structured_data || (!structured_data.grup1 && !structured_data.grup2)) {
+                 resultsFrame.insertAdjacentHTML('beforeend', `<div class="result-card" style="color:orange;">--- ${title} ---<br>İçerik bulunamadı veya ayrıştırılamadı.</div>`);
+                return;
+            }
+
+            // Başlıkları belirle (Orijinal koddaki mantık)
+            let headers = {};
+            let columns = {};
+            if (data_type === 'akd') {
+                headers = {"grup1": "Net Alım Yapanlar", "grup2": "Net Satım Yapanlar"};
+                columns = {"col3": "Net Lot", "col4": "Maliyet"};
+            } else { // takas
+                if (period.includes("Son Takas")) {
+                    headers = {"grup1": "Saklama Payı Dağılımı"};
+                    columns = {"col3": "Lot", "col4": "Pay Oranı (%)"};
+                } else {
+                    headers = {"grup1": "Takası Artanlar", "grup2": "Takası Azaltanlar"};
+                    columns = {"col3": "Fark Lot", "col4": "Pay Oranı (%)"};
+                }
+            }
+
+            let tableHtml = '';
+            for (const section in headers) { // 'grup1' ve 'grup2' için döner
+                if (structured_data[section] && structured_data[section].length > 0) {
+                    tableHtml += `<h5 style="margin-top:15px; margin-bottom:5px; font-style:italic;">${headers[section]}</h5>`;
+                    tableHtml += `
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>Kurum</th>
+                                    <th>${columns.col3}</th>
+                                    <th>${columns.col4}</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                    `;
+                    // Tablo satırlarını oluştur
+                    structured_data[section].forEach(row => {
+                        tableHtml += `
+                            <tr>
+                                <td class="num-sira">${row[0]}</td>
+                                <td>${row[1]}</td>
+                                <td class="num-data">${row[2]}</td>
+                                <td class="num-data">${row[3]}</td>
+                            </tr>
+                        `;
+                    });
+                    tableHtml += `</tbody></table>`;
+                }
+            }
+
+            const finalHtml = `
+                <div class="result-card">
+                    <h4>${title}</h4>
+                    ${price_info ? `<div class="price-info">Güncel Fiyat: ${price_info}</div>` : ''}
+                    ${tableHtml}
+                </div>
+            `;
+            resultsFrame.insertAdjacentHTML('beforeend', finalHtml);
+        }
+
+    </script>
+</body>
+</html>

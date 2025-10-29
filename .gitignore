@@ -1,0 +1,10 @@
+# Gizli oturum dosyası
+hisse_session.session
+
+# Geçmiş dosyası
+*.pkl
+
+# Python önbellek dosyaları
+__pycache__/
+
+get_session.py
