@@ -428,6 +428,7 @@ def handle_start_fetch(data):
 # --- Sunucuyu Başlatma ---
 # --- Sunucuyu Başlatma (Render için ayarlandı) ---
 if __name__ == '__main__':
+    bot_username = os.environ.get('BOT_USERNAME')
     # Render, 'PORT' adında bir çevre değişkeni sağlar
     port = int(os.environ.get('PORT', 5000))
     # 'debug=True' sunucuda kapalı olmalı
