@@ -3,13 +3,21 @@
 <head>
     <meta charset="UTF-8">
     <title>Yönetici Paneli</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.min.js"></script>
     <style>
         body { background-color: #1a1a1a; color: white; font-family: Arial, sans-serif; padding: 20px; }
         h1, h2 { color: #3498db; }
         .panel-section { background-color: #2a2a2a; padding: 20px; border-radius: 10px; margin-bottom: 20px; }
-        table { width: 100%; border-collapse: collapse; }
-        th, td { padding: 10px; border: 1px solid #444; text-align: left; }
+        table { width: 100%; border-collapse: collapse; table-layout: fixed; /* Tabloyu sabit genişlikte tutar */ }
+        th, td { padding: 10px; border: 1px solid #444; text-align: left; word-wrap: break-word; /* Uzun metinleri kırar */ }
         th { background-color: #333; }
+
+        /* Sütun Genişlikleri */
+        .col-ip { width: 20%; }
+        .col-device { width: 35%; } /* Cihaz bilgisi sütunu daha geniş */
+        .col-date { width: 20%; }
+        .col-action { width: 25%; }
+
         form { margin: 5px 0; }
         button { padding: 5px 10px; cursor: pointer; border: none; border-radius: 3px; }
         .btn-accept { background-color: #2ecc71; color: white; }
@@ -17,23 +25,33 @@
         .btn-block { background-color: #e74c3c; color: white; }
         input[type="text"] { background: #333; color: white; border: 1px solid #555; padding: 8px; border-radius: 3px; }
         .manual-add { margin-top: 15px; }
-        .logout { position: absolute; top: 20px; right: 20px; background-color: #e74c3c; color: white; padding: 10px; border-radius: 5px; text-decoration: none; }
+        .nav-links { position: absolute; top: 20px; right: 20px; }
+        .nav-links a { background-color: #3498db; color: white; padding: 10px; border-radius: 5px; text-decoration: none; margin-left: 10px; }
+        .nav-links .logout { background-color: #e74c3c; }
     </style>
 </head>
 <body>
     <h1>Yönetici Paneli</h1>
-    <a href="/logout" class="logout">Çıkış Yap</a>
+    <div class="nav-links">
+        <a href="/">Ana Sayfa (Hisse Aracı)</a>
+        <a href="/logout" class="logout">Çıkış Yap</a>
+    </div>
 
     <div class="panel-section">
         <h2>Bekleyen İstekler</h2>
         <table>
             <thead>
-                <tr><th>IP Adresi</th><th>Tarih</th><th>Eylemler</th></tr>
+                <tr>
+                    <th class="col-ip">IP Adresi</th>
+                    <th class="col-device">Cihaz Bilgisi (User-Agent)</th> <th class="col-date">Tarih</th>
+                    <th class="col-action">Eylemler</th>
+                </tr>
             </thead>
             <tbody>
                 {% for ip in pending %}
                 <tr>
                     <td>{{ ip.ip_address }}</td>
+                    <td><small>{{ ip.user_agent[:60] if ip.user_agent else 'Bilinmiyor' }}...</small></td>
                     <td>{{ ip.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
                     <td>
                         <form method="POST" action="/admin/handle-request" style="display:inline;">
@@ -61,12 +79,16 @@
         <h2>İzin Verilen IP'ler</h2>
         <table>
             <thead>
-                <tr><th>IP Adresi</th><th>Eylem</th></tr>
+                <tr>
+                    <th class="col-ip">IP Adresi</th>
+                    <th class="col-device">Cihaz Bilgisi (User-Agent)</th> <th class="col-action">Eylem</th>
+                </tr>
             </thead>
             <tbody>
                 {% for ip in accepted %}
                 <tr>
                     <td>{{ ip.ip_address }}</td>
+                    <td><small>{{ ip.user_agent[:60] if ip.user_agent else 'Bilinmiyor' }}...</small></td>
                     <td>
                          <form method="POST" action="/admin/remove-accepted" style="display:inline;">
                             <input type="hidden" name="ip" value="{{ ip.ip_address }}">
@@ -83,12 +105,16 @@
         <h2>Engellenen IP'ler</h2>
         <table>
             <thead>
-                <tr><th>IP Adresi</th><th>Eylem</th></tr>
+                <tr>
+                    <th class="col-ip">IP Adresi</th>
+                    <th class="col-device">Cihaz Bilgisi (User-Agent)</th> <th class="col-action">Eylem</th>
+                </tr>
             </thead>
             <tbody>
                 {% for ip in blocked %}
                 <tr>
                     <td>{{ ip.ip_address }}</td>
+                    <td><small>{{ ip.user_agent[:60] if ip.user_agent else 'Bilinmiyor' }}...</small></td>
                     <td>
                          <form method="POST" action="/admin/unblock" style="display:inline;">
                             <input type="hidden" name="ip" value="{{ ip.ip_address }}">
