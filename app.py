@@ -42,6 +42,7 @@ login_manager.session_protection = "strong"
 
 socketio = SocketIO(app)
 
+
 # --- YENİ: YÖNETİCİ GİRİŞ MODELİ ---
 class Admin(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -54,6 +55,7 @@ class Admin(UserMixin, db.Model):
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
 
+
 @login_manager.user_loader
 def load_user(user_id):
     try:
@@ -63,24 +65,26 @@ def load_user(user_id):
         print(f"load_user error: {e}")
         return None
 
+
 # --- YENİ: IP İZİN MODELİ (CİHAZ BİLGİSİ EKLENDİ) ---
 class AllowedIP(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     ip_address = db.Column(db.String(50), unique=True, nullable=False)
-    status = db.Column(db.String(20), nullable=False) # 'accepted', 'blocked', 'pending'
+    status = db.Column(db.String(20), nullable=False)  # 'accepted', 'blocked', 'pending'
     timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
     # YENİ SÜTUN: Cihaz bilgisi (User-Agent)
     user_agent = db.Column(db.String(255), nullable=True)
+
 
 # --- YENİ: İLK YÖNETİCİYİ OLUŞTURMA ---
 def create_first_admin():
     try:
         with app.app_context():
-            db.create_all() # Tüm tabloları oluştur
+            db.create_all()  # Tüm tabloları oluştur
             if not Admin.query.filter_by(username='musab').first():
                 print("İlk yönetici (musab) oluşturuluyor...")
                 admin_user = Admin(username='musab')
-                admin_user.set_password('kaan') # Şifre: kaan
+                admin_user.set_password('kaan')  # Şifre: kaan
                 db.session.add(admin_user)
                 db.session.commit()
                 print("Yönetici oluşturuldu.")
@@ -89,11 +93,13 @@ def create_first_admin():
     except Exception as e:
         print(f"Veritabanı veya yönetici oluşturulurken hata oluştu: {e}")
 
+
 # --- YENİ: IP KONTROL SİSTEMİ (GÜNCELLENDİ) ---
 def get_user_ip():
     if 'X-Forwarded-For' in request.headers:
         return request.headers['X-Forwarded-For'].split(',')[0].strip()
     return request.remote_addr
+
 
 def ip_whitelist_required(f):
     @wraps(f)
@@ -112,7 +118,8 @@ def ip_whitelist_required(f):
                 return f(*args, **kwargs)
 
             if ip_entry and ip_entry.status == 'blocked':
-                return render_template('reject.html', user_ip=user_ip, message="IP adresiniz yönetici tarafından engellenmiştir.")
+                return render_template('reject.html', user_ip=user_ip,
+                                       message="IP adresiniz yönetici tarafından engellenmiştir.")
 
             if ip_entry and ip_entry.status == 'pending':
                 return render_template('reject.html', user_ip=user_ip, message="İsteğiniz zaten gönderildi, beklemede.")
@@ -122,16 +129,18 @@ def ip_whitelist_required(f):
 
         except Exception as e:
             print(f"IP KONTROL HATASI (Veritabanı uyanıyor olabilir): {e}")
-            return render_template('reject.html', user_ip=user_ip, message="Veritabanı hatası. Lütfen 1 dakika sonra tekrar deneyin.")
+            return render_template('reject.html', user_ip=user_ip,
+                                   message="Veritabanı hatası. Lütfen 1 dakika sonra tekrar deneyin.")
 
     return decorated_function
+
 
 # --- ESKİ VERİ ÇEKME KODU (DEĞİŞMEDİ) ---
 # (Tüm fetch_data, fetch_price_only, fetch_depth_data fonksiyonları)
 async def fetch_data(client, hisse_kodu, zaman_araligi, data_type, status_callback):
     message_ids = []
     price_info = None
-    try:
+    try:  # <-- TRY BLOĞU BURADA BAŞLIYOR
         command = f"/{data_type} {hisse_kodu}"
         son_gonderilen_mesaj = await client.send_message(bot_username, command)
         message_ids.append(son_gonderilen_mesaj.id)
@@ -187,9 +196,11 @@ async def fetch_data(client, hisse_kodu, zaman_araligi, data_type, status_callba
                     sira, kurum, lot_veya_fark, parantez_ici = match.groups()
                     data[aktif_bolum].append(
                         (sira, kurum.strip(), lot_veya_fark.strip(), parantez_ici if parantez_ici else "-"))
-    return {"data": data, "ids": message_ids, "price_info": price_info}
-except Exception as e:
-    return {"hata": f"Bir hata oluştu: {e}", "ids": message_ids}
+        return {"data": data, "ids": message_ids,
+                "price_info": price_info}  # <-- HATALI SATIR BUYDU, TRY bloğunun içindeydi.
+    except Exception as e:  # <-- EXCEPT BLOĞU BURAYA EKLENDİ
+        return {"hata": f"Bir hata oluştu: {e}", "ids": message_ids}
+
 
 async def fetch_price_only(client, hisse_kodu, status_callback):
     result = await fetch_data(client, hisse_kodu, "Günlük", "akd", status_callback)
@@ -198,6 +209,7 @@ async def fetch_price_only(client, hisse_kodu, status_callback):
             "ids": result.get("ids", []),
             "price_info": f"{hisse_kodu.upper()} Güncel Fiyat: {price_info}",
             "is_price_only": True}
+
 
 async def fetch_depth_data(client, hisse_kodu, status_callback):
     message_ids = []
@@ -259,9 +271,9 @@ async def fetch_depth_data(client, hisse_kodu, status_callback):
     except Exception as e:
         return {"hata": f"Derinlik verisi alınırken hata oluştu: {e}", "ids": message_ids}
 
+
 # Async iş parçacığı (değişmedi)
 def run_fetch_logic(params):
-
     def status_callback(msg):
         socketio.emit('status_update', {'msg': msg, 'color': 'gray'})
 
@@ -314,7 +326,7 @@ def run_fetch_logic(params):
                             result = await fetch_data(client, hisse_kodu, zaman, 'akd', status_callback)
                             all_message_ids_to_delete.extend(result.get("ids", []))
                             price_info_to_display = result.get("price_info") if (
-                                                                                            fiyat_secili or zaman == 'Günlük') and hisse_kodu not in fiyat_gosterildi else None
+                                                                                        fiyat_secili or zaman == 'Günlük') and hisse_kodu not in fiyat_gosterildi else None
                             if price_info_to_display: fiyat_gosterildi.add(hisse_kodu)
                             title = f"{hisse_kodu} {zaman} AKD VERİLERİ"
                             socketio.emit('new_data', {
@@ -378,6 +390,7 @@ def run_fetch_logic(params):
         'duration_msg': f'Toplam süre: {toplam_sure:.2f} saniye'
     })
 
+
 # --- YENİ: WEB SAYFASI ROTALARI (ROUTES) ---
 
 @app.route('/')
@@ -385,6 +398,7 @@ def run_fetch_logic(params):
 def index():
     """Ana hisse senedi aracını sunar (index.html)."""
     return render_template('index.html')
+
 
 @app.route('/request-access', methods=['GET', 'POST'])
 def request_access():
@@ -401,17 +415,21 @@ def request_access():
             new_request = AllowedIP(ip_address=user_ip,
                                     status='pending',
                                     timestamp=datetime.datetime.utcnow(),
-                                    user_agent=user_agent_string) # <-- BU YENİ
+                                    user_agent=user_agent_string)
             db.session.add(new_request)
             db.session.commit()
-            return render_template('reject.html', user_ip=user_ip, message="İsteğiniz başarıyla alındı. Yönetici onayı bekleniyor.")
+            return render_template('reject.html', user_ip=user_ip,
+                                   message="İsteğiniz başarıyla alındı. Yönetici onayı bekleniyor.")
         elif existing_ip.status == 'blocked':
-             return render_template('reject.html', user_ip=user_ip, message="IP adresiniz yönetici tarafından engellenmiştir.")
+            return render_template('reject.html', user_ip=user_ip,
+                                   message="IP adresiniz yönetici tarafından engellenmiştir.")
         else:
-            return render_template('reject.html', user_ip=user_ip, message="Zaten bir isteğiniz var veya IP'niz zaten kabul edilmiş.")
+            return render_template('reject.html', user_ip=user_ip,
+                                   message="Zaten bir isteğiniz var veya IP'niz zaten kabul edilmiş.")
 
     # IP listede hiç yoksa (GET request), reject.html'i göster (IP ile birlikte)
     return render_template('reject.html', user_ip=user_ip)
+
 
 # --- YENİ: YÖNETİCİ PANELİ ROTALARI ---
 
@@ -435,11 +453,13 @@ def login():
 
     return render_template('login.html')
 
+
 @app.route('/logout')
 @login_required
 def logout():
     logout_user()
     return redirect(url_for('login'))
+
 
 @app.route('/admin')
 @login_required
@@ -453,6 +473,7 @@ def admin_panel():
                            pending=pending_ips,
                            accepted=accepted_ips,
                            blocked=blocked_ips)
+
 
 @app.route('/admin/handle-request', methods=['POST'])
 @login_required
@@ -477,6 +498,7 @@ def handle_request():
     db.session.commit()
     return redirect(url_for('admin_panel'))
 
+
 @app.route('/admin/manual-add', methods=['POST'])
 @login_required
 def manual_add():
@@ -497,11 +519,12 @@ def manual_add():
         new_ip = AllowedIP(ip_address=ip_addr,
                            status='accepted',
                            timestamp=datetime.datetime.utcnow(),
-                           user_agent="Manuel Eklendi") # <-- BU YENİ
+                           user_agent="Manuel Eklendi")
         db.session.add(new_ip)
 
     db.session.commit()
     return redirect(url_for('admin_panel'))
+
 
 @app.route('/admin/remove-accepted', methods=['POST'])
 @login_required
@@ -512,6 +535,7 @@ def remove_accepted():
         db.session.delete(ip_entry)
         db.session.commit()
     return redirect(url_for('admin_panel'))
+
 
 @app.route('/admin/unblock', methods=['POST'])
 @login_required
@@ -530,6 +554,7 @@ def unblock():
 @ip_whitelist_required
 def handle_connect():
     print(f'İzin verilen istemci ({g.user_ip}) bağlandı')
+
 
 @socketio.on('start_fetch')
 @ip_whitelist_required
