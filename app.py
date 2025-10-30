@@ -1,82 +1,134 @@
-# app.py KODU
 import asyncio
 import time
 import re
 import os
-import random
-import pickle  # Geçmiş için
-import datetime  # Zaman damgası için
+import pickle
+import datetime
 import threading
-from telethon.sessions import StringSession
 from telethon.sync import TelegramClient
+from telethon.sessions import StringSession
 
-from flask import Flask, render_template
+from flask import (Flask, render_template, request, redirect, url_for,
+                   abort, session, flash, g)
 from flask_socketio import SocketIO, emit
+from flask_sqlalchemy import SQLAlchemy
+from flask_login import (LoginManager, UserMixin, login_user, logout_user,
+                         login_required, current_user)
+from werkzeug.security import generate_password_hash, check_password_hash
+from functools import wraps
 
-# app.py'de böyle olmalı:
+# --- KENDİ BİLGİLERİN (Sunucudan Çekilecek) ---
 api_id = os.environ.get('API_ID')
 api_hash = os.environ.get('API_HASH')
 session_string = os.environ.get('TELETHON_SESSION')
-# Sunucuya yüklediğimizde kalıcı depolama alanı burası olacak
-# Ücretsiz planda bu, sunucu uyandığında sıfırlanan geçici bir klasördür.
-DATA_DIR = os.environ.get('RENDER_DISK_MOUNT_PATH', '.')
+bot_username = os.environ.get('BOT_USERNAME')
+
+# --- YENİ: VERİTABANI BAĞLANTISI ---
+DATABASE_URL = os.environ.get('DATABASE_URL')
 
 # --- Flask ve SocketIO Kurulumu ---
 app = Flask(__name__)
-# Gizli anahtar, sunucu oturumları için gereklidir
-app.config['SECRET_KEY'] = 'cok-gizli-bir-anahtar!'
+# SECRET_KEY, Render'dan da çekilebilir, ama bu da çalışır.
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'cok-gizli-bir-anahtar-daha-ekle')
+
+# YENİ: Veritabanı yapılandırması
+app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
+
+# YENİ: Giriş (Login) Yöneticisi
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login' # Giriş yapılmamışsa '/login'e yönlendir
+login_manager.login_message = "Lütfen yönetici panelini görmek için giriş yapın."
+login_manager.session_protection = "strong"
+
 socketio = SocketIO(app)
 
+# --- YENİ: YÖNETİCİ GİRİŞ MODELİ ---
+class Admin(UserMixin, db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(50), unique=True)
+    password_hash = db.Column(db.String(256))
 
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
 
-# --- TARAMA VE GEÇMİŞ (DEĞİŞMEDİ) ---
-TARAMA_LISTESI = [
-    'AKBNK', 'ARCLK', 'ASELS', 'BIMAS', 'DOHOL', 'EKGYO', 'EREGL', 'FROTO', 'GARAN', 'GUBRF', 'HALKB', 'ISCTR', 'KCHOL',
-    'KOZAA', 'KOZAL', 'KRDMD', 'MGROS', 'PETKM', 'PGSUS', 'SAHOL', 'SASA', 'SISE', 'SOKM', 'TAVHL', 'TCELL', 'THYAO',
-    'TKFEN', 'TOASO', 'TTKOM', 'TUPRS', 'ULKER', 'VAKBN', 'YKBNK'
-]
-HISTORY_FILE = os.path.join(DATA_DIR, "query_history.pkl")
-history_list = []
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
 
-
-# load_history() ve save_history() fonksiyonları değişmedi
-def load_history():
-    global history_list
-    if os.path.exists(HISTORY_FILE):
-        try:
-            with open(HISTORY_FILE, "rb") as f:
-                history_list = pickle.load(f)
-        except Exception as e:
-            print(f"Geçmiş yüklenirken hata: {e}")
-            history_list = []
-    else:
-        history_list = []
-
-
-def save_history():
+@login_manager.user_loader
+def load_user(user_id):
     try:
-        with open(HISTORY_FILE, "wb") as f:
-            pickle.dump(history_list, f)
+        return db.session.get(Admin, int(user_id))
     except Exception as e:
-        print(f"Geçmiş kaydedilirken hata: {e}")
+        print(f"load_user error: {e}")
+        return None
 
+# --- YENİ: IP İZİN MODELİ ---
+class AllowedIP(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    ip_address = db.Column(db.String(50), unique=True, nullable=False)
+    status = db.Column(db.String(20), nullable=False) # 'accepted', 'blocked', 'pending'
+    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
-def add_to_history(new_entry):
-    global history_list
-    history_list.insert(0, new_entry)
-    history_list = history_list[:10]  # Son 10'u tut
-    save_history()
-    # Geçmiş penceresi web'de farklı ele alınacak, bu yüzden GUI güncellemesi kaldırıldı.
+# --- YENİ: İLK YÖNETİCİYİ OLUŞTURMA ---
+def create_first_admin():
+    with app.app_context():
+        db.create_all() # Tüm tabloları oluştur
+        if not Admin.query.filter_by(username='musab').first():
+            print("İlk yönetici (musab) oluşturuluyor...")
+            admin_user = Admin(username='musab')
+            admin_user.set_password('kaan') # Şifre: kaan
+            db.session.add(admin_user)
+            db.session.commit()
+            print("Yönetici oluşturuldu.")
+        else:
+            print("Yönetici zaten mevcut.")
 
+# --- YENİ: IP KONTROL SİSTEMİ (ÇOK ÖNEMLİ) ---
+def get_user_ip():
+    # Render'ın ters proxy'si arkasından gerçek IP'yi alma
+    if 'X-Forwarded-For' in request.headers:
+        return request.headers['X-Forwarded-For'].split(',')[0].strip()
+    return request.remote_addr
 
-# AI_PROMPT (Şimdilik web'de kullanılmıyor, ancak mantık sunucuda kalabilir)
-AI_PROMPT = """(PROMPT METNİ KISALTILDI)"""
+# Bu 'decorator', bir sayfayı çağırmadan önce IP'yi kontrol eder
+def ip_whitelist_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        user_ip = get_user_ip()
 
+        # 1. Kendi IP'mizi (Yönetici) her zaman izin ver
+        # (Bu, kendimizi kilitlememek için bir güvenlik önlemi)
+        # Şimdilik, admin girişi yaptıysa izin vereceğiz.
+        if current_user.is_authenticated:
+            g.user_ip = user_ip # IP'yi global 'g' objesine kaydet
+            return f(*args, **kwargs)
 
-# --- VERİ ÇEKME FONKSİYONLARI (GÜNCELLENDİ) ---
-# 'window.after' ve 'status_var' güncellemeleri kaldırıldı.
-# Onun yerine bir 'status_callback' fonksiyonu alacaklar.
+        # 2. Veritabanından IP'yi kontrol et
+        ip_entry = AllowedIP.query.filter_by(ip_address=user_ip).first()
 
+        if ip_entry and ip_entry.status == 'accepted':
+            # IP "kabul edilmiş" listesindeyse, siteye izin ver
+            g.user_ip = user_ip # IP'yi global 'g' objesine kaydet
+            return f(*args, **kwargs)
+
+        # 3. IP "engellenmiş" listesindeyse
+        if ip_entry and ip_entry.status == 'blocked':
+            return render_template('reject.html', user_ip=user_ip, message="IP adresiniz yönetici tarafından engellenmiştir.")
+
+        # 4. IP "beklemede" ise
+        if ip_entry and ip_entry.status == 'pending':
+            return render_template('reject.html', user_ip=user_ip, message="İsteğiniz zaten gönderildi, beklemede.")
+
+        # 5. IP listede hiç yoksa
+        return render_template('reject.html', user_ip=user_ip)
+
+    return decorated_function
+
+# --- ESKİ VERİ ÇEKME KODU (DEĞİŞMEDİ) ---
+# (Tüm fetch_data, fetch_price_only, fetch_depth_data fonksiyonları)
 async def fetch_data(client, hisse_kodu, zaman_araligi, data_type, status_callback):
     message_ids = []
     price_info = None
@@ -86,9 +138,8 @@ async def fetch_data(client, hisse_kodu, zaman_araligi, data_type, status_callba
         message_ids.append(son_gonderilen_mesaj.id)
         butonlu_mesaj = None
         for i in range(120):
-            # GÜNCELLENDİ: Durum güncellemesi web'e gönderilir
             status_callback(f"({hisse_kodu}) {zaman_araligi} için botun cevabı bekleniyor{'.' * (i % 4)}")
-            time.sleep(0.25)
+            await asyncio.sleep(0.25) # time.sleep yerine asyncio.sleep
             messages = await client.get_messages(bot_username, limit=1)
             if messages and messages[0].id > son_gonderilen_mesaj.id and messages[0].reply_markup:
                 butonlu_mesaj = messages[0];
@@ -99,9 +150,8 @@ async def fetch_data(client, hisse_kodu, zaman_araligi, data_type, status_callba
         await butonlu_mesaj.click(text=zaman_araligi)
         veri_mesaji = None
         for i in range(120):
-            # GÜNCELLENDİ: Durum güncellemesi web'e gönderilir
             status_callback(f"({hisse_kodu}) {zaman_araligi} verisi bekleniyor{'.' * (i % 4)}")
-            time.sleep(0.25)
+            await asyncio.sleep(0.25) # time.sleep yerine asyncio.sleep
             latest_message = (await client.get_messages(bot_username, limit=1))[0]
             if latest_message.id > butonlu_mesaj.id or (
                     latest_message.id == butonlu_mesaj.id and latest_message.text != orjinal_metin):
@@ -117,8 +167,6 @@ async def fetch_data(client, hisse_kodu, zaman_araligi, data_type, status_callba
                 price_info = "N/A"
         satirlar = veri_mesaji.text.splitlines()
         data = {"grup1": [], "grup2": []}
-
-        # ... (Veri ayrıştırma mantığı (Regex) değişmedi) ...
         if data_type == 'takas' and 'Son Takas' in zaman_araligi:
             aktif_bolum = "grup1"
             for satir in satirlar:
@@ -140,11 +188,9 @@ async def fetch_data(client, hisse_kodu, zaman_araligi, data_type, status_callba
                     sira, kurum, lot_veya_fark, parantez_ici = match.groups()
                     data[aktif_bolum].append(
                         (sira, kurum.strip(), lot_veya_fark.strip(), parantez_ici if parantez_ici else "-"))
-
         return {"data": data, "ids": message_ids, "price_info": price_info}
     except Exception as e:
         return {"hata": f"Bir hata oluştu: {e}", "ids": message_ids}
-
 
 async def fetch_price_only(client, hisse_kodu, status_callback):
     result = await fetch_data(client, hisse_kodu, "Günlük", "akd", status_callback)
@@ -154,7 +200,6 @@ async def fetch_price_only(client, hisse_kodu, status_callback):
             "price_info": f"{hisse_kodu.upper()} Güncel Fiyat: {price_info}",
             "is_price_only": True}
 
-
 async def fetch_depth_data(client, hisse_kodu, status_callback):
     message_ids = []
     try:
@@ -163,9 +208,8 @@ async def fetch_depth_data(client, hisse_kodu, status_callback):
         message_ids.append(son_gonderilen_mesaj.id)
         ilk_yanit_mesaji = None
         for i in range(120):
-            # GÜNCELLENDİ: Durum güncellemesi web'e gönderilir
             status_callback(f"({hisse_kodu}) Derinlik bekleniyor{'.' * (i % 4)}")
-            time.sleep(0.25)
+            await asyncio.sleep(0.25) # time.sleep yerine asyncio.sleep
             messages = await client.get_messages(bot_username, limit=1)
             if messages and messages[0].id > son_gonderilen_mesaj.id:
                 ilk_yanit_mesaji = messages[0];
@@ -179,9 +223,8 @@ async def fetch_depth_data(client, hisse_kodu, status_callback):
             veri_mesaji = ilk_yanit_mesaji
         else:
             for i in range(120):
-                # GÜNCELLENDİ: Durum güncellemesi web'e gönderilir
                 status_callback(f"({hisse_kodu}) Veri bekleniyor{'.' * (i % 4)}")
-                time.sleep(0.25)
+                await asyncio.sleep(0.25) # time.sleep yerine asyncio.sleep
                 latest_message = (await client.get_messages(bot_username, limit=1))[0]
                 if latest_message.id > ilk_yanit_mesaji.id or (
                         latest_message.id == ilk_yanit_mesaji.id and latest_message.text != orjinal_metin):
@@ -192,7 +235,6 @@ async def fetch_depth_data(client, hisse_kodu, status_callback):
         if not veri_mesaji:
             return {"hata": "Derinlik verisi zaman aşımına uğradı.", "ids": message_ids}
 
-        # ... (Derinlik veri ayrıştırması değişmedi) ...
         text = veri_mesaji.text
         text_lines = text.splitlines()
         fiyat, saat, alis_lot, satis_lot = "-", "-", 0, 0
@@ -219,22 +261,11 @@ async def fetch_depth_data(client, hisse_kodu, status_callback):
         return {"hata": f"Derinlik verisi alınırken hata oluştu: {e}", "ids": message_ids}
 
 
-# --- WEB ARAYÜZÜ İÇİN GEREKLİ TÜM GÖRSEL KODLAR KALDIRILDI ---
-# (create_and_display_table, create_and_display_depth, save_results_to_file vb. kaldırıldı)
-# (SplashScreen, HistoryWindow, ScannerWindow sınıfları kaldırıldı)
-# (Tüm ctk ve tk ana arayüz kurulum kodları kaldırıldı)
-# ...
-# ...
-
-
-# --- YENİ: VERİ ÇEKME İŞ PARÇACIĞI (WEBSOCKET İÇİN UYARLANDI) ---
+# Async iş parçacığı (değişmedi)
 def run_fetch_logic(params):
-    """
-    Bu fonksiyon, SocketIO tarafından bir arka plan thread'inde çalıştırılacak.
-    Tüm 'window.after' çağrıları 'socketio.emit' ile değiştirildi.
-    """
 
-    # 1. Parametreleri al
+    # ... (TÜM run_fetch_logic KODU BURADA, KISALTILDI) ...
+    # (Sadece 'async with' satırını güncelledik)
     hisse_listesi = params.get("hisse_listesi", [])
     fiyat_secili = params.get("fiyat_secili", False)
     akd_secilenler = params.get("akd_secilenler", [])
@@ -247,170 +278,282 @@ def run_fetch_logic(params):
 
     toplam_baslangic = time.time()
     all_message_ids_to_delete = []
-    current_query_results = []  # Geçmiş kaydı için (bu mantık korundu)
 
-    # Durum güncellemelerini web'e göndermek için bir yardımcı fonksiyon
+    # Bu callback, artık 'asyncio.run' içinden çağrıldığı için
+    # doğrudan socketio.emit kullanamaz, ana thread'e göndermesi lazım.
+    # Kolay çözüm: socketio.emit'i 'run_fetch_logic' dışından çağırmak.
+    # Şimdilik, socketio.emit'in thread-safe olduğunu varsayıyoruz (ki öyle olmalı).
     def status_callback(msg):
         socketio.emit('status_update', {'msg': msg, 'color': 'gray'})
 
     async def main_async_logic():
-        # 'hisse_session' dosyası yerine 'session_string' kullanıyoruz
-        async with TelegramClient(StringSession(session_string), api_id, api_hash) as client:
-            fiyat_gosterildi = set()
-            for i, hisse_kodu in enumerate(hisse_listesi):
-                if i > 0:
-                    # Arayüzde ayırıcı çizgi göster
-                    socketio.emit('new_separator')
+        # YENİ: StringSession kullan
+        if not api_id or not api_hash or not session_string or not bot_username:
+            print("HATA: Gizli değişkenler (API_ID, API_HASH, TELETHON_SESSION, BOT_USERNAME) eksik.")
+            status_callback("Sunucu hatası: Lütfen yöneticiyle iletişime geçin.")
+            return
 
-                socketio.emit('status_update', {
-                    'msg': f"İşleniyor: {hisse_kodu} ({i + 1}/{len(hisse_listesi)})",
-                    'color': 'white'
-                })
+        try:
+            async with TelegramClient(StringSession(session_string), api_id, api_hash) as client:
+                fiyat_gosterildi = set()
+                for i, hisse_kodu in enumerate(hisse_listesi):
+                    if i > 0:
+                        socketio.emit('new_separator')
 
-                if derinlik_secili:
-                    result = await fetch_depth_data(client, hisse_kodu, status_callback)
-                    all_message_ids_to_delete.extend(result.get("ids", []))
-                    current_query_results.append({
-                        "type": "depth", "hisse": hisse_kodu, "data": result
+                    socketio.emit('status_update', {
+                        'msg': f"İşleniyor: {hisse_kodu} ({i + 1}/{len(hisse_listesi)})",
+                        'color': 'white'
                     })
-                    # GÜNCELLENDİ: Veriyi web'e gönder
-                    socketio.emit('new_data', {'type': 'depth', 'hisse': hisse_kodu, 'data': result})
 
-                if fiyat_secili and not akd_secilenler and not takas_secilenler:
-                    result = await fetch_price_only(client, hisse_kodu, status_callback)
-                    all_message_ids_to_delete.extend(result.get("ids", []))
-                    current_query_results.append({
-                        "type": "price", "hisse": hisse_kodu, "period": "Günlük", "data": result
-                    })
-                    # GÜNCELLENDİ: Veriyi web'e gönder
-                    socketio.emit('new_data', {
-                        'type': 'price_only',
-                        'hisse': hisse_kodu,
-                        'data': result
-                    })
-                    continue
-
-                if (derinlik_secili and akd_secilenler) or (derinlik_secili and takas_secilenler):
-                    socketio.emit('new_separator')
-
-                if akd_secilenler:
-                    for zaman in akd_secilenler:
-                        result = await fetch_data(client, hisse_kodu, zaman, 'akd', status_callback)
+                    if derinlik_secili:
+                        result = await fetch_depth_data(client, hisse_kodu, status_callback)
                         all_message_ids_to_delete.extend(result.get("ids", []))
-                        current_query_results.append({
-                            "type": "akd", "hisse": hisse_kodu, "period": zaman, "data": result
-                        })
-                        price_info_to_display = result.get("price_info") if (
-                                                                                    fiyat_secili or zaman == 'Günlük') and hisse_kodu not in fiyat_gosterildi else None
-                        if price_info_to_display: fiyat_gosterildi.add(hisse_kodu)
-                        title = f"{hisse_kodu} {zaman} AKD VERİLERİ"
-                        # GÜNCELLENDİ: Veriyi web'e gönder
+                        socketio.emit('new_data', {'type': 'depth', 'hisse': hisse_kodu, 'data': result})
+
+                    if fiyat_secili and not akd_secilenler and not takas_secilenler:
+                        result = await fetch_price_only(client, hisse_kodu, status_callback)
+                        all_message_ids_to_delete.extend(result.get("ids", []))
                         socketio.emit('new_data', {
-                            'type': 'table',
-                            'data_type': 'akd',
-                            'period': zaman,
-                            'title': title,
-                            'result_data': result,
-                            'price_info': price_info_to_display
+                            'type': 'price_only',
+                            'hisse': hisse_kodu,
+                            'data': result
                         })
+                        continue
 
-                if akd_secilenler and takas_secilenler:
-                    socketio.emit('new_separator')
+                    if (derinlik_secili and akd_secilenler) or (derinlik_secili and takas_secilenler):
+                        socketio.emit('new_separator')
 
-                if takas_secilenler:
-                    if fiyat_secili and hisse_kodu not in fiyat_gosterildi:
-                        price_result = await fetch_price_only(client, hisse_kodu, status_callback)
-                        all_message_ids_to_delete.extend(price_result.get("ids", []))
-                        current_query_results.append({
-                            "type": "price", "hisse": hisse_kodu, "period": "Günlük", "data": price_result
-                        })
-                        if "price_info" in price_result:
-                            # GÜNCELLENDİ: Veriyi web'e gönder
+                    if akd_secilenler:
+                        for zaman in akd_secilenler:
+                            result = await fetch_data(client, hisse_kodu, zaman, 'akd', status_callback)
+                            all_message_ids_to_delete.extend(result.get("ids", []))
+                            price_info_to_display = result.get("price_info") if (
+                                                                                            fiyat_secili or zaman == 'Günlük') and hisse_kodu not in fiyat_gosterildi else None
+                            if price_info_to_display: fiyat_gosterildi.add(hisse_kodu)
+                            title = f"{hisse_kodu} {zaman} AKD VERİLERİ"
                             socketio.emit('new_data', {
-                                'type': 'price_only',
-                                'hisse': hisse_kodu,
-                                'data': price_result
+                                'type': 'table',
+                                'data_type': 'akd',
+                                'period': zaman,
+                                'title': title,
+                                'result_data': result,
+                                'price_info': price_info_to_display
                             })
-                            fiyat_gosterildi.add(hisse_kodu)
 
-                    for zaman in takas_secilenler:
-                        result = await fetch_data(client, hisse_kodu, zaman, 'takas', status_callback)
-                        all_message_ids_to_delete.extend(result.get("ids", []))
-                        current_query_results.append({
-                            "type": "takas", "hisse": hisse_kodu, "period": zaman, "data": result
-                        })
-                        title = f"{hisse_kodu} {zaman} TAKAS VERİLERİ"
-                        # GÜNCELLENDİ: Veriyi web'e gönder
-                        socketio.emit('new_data', {
-                            'type': 'table',
-                            'data_type': 'takas',
-                            'period': zaman,
-                            'title': title,
-                            'result_data': result,
-                            'price_info': None
-                        })
+                    if akd_secilenler and takas_secilenler:
+                        socketio.emit('new_separator')
 
-            if all_message_ids_to_delete:
-                socketio.emit('status_update', {'msg': 'Sohbet geçmişi temizleniyor...', 'color': 'gray'})
-                unique_ids = list(set(all_message_ids_to_delete))
-                await client.delete_messages(bot_username, unique_ids, revoke=True)
+                    if takas_secilenler:
+                        if fiyat_secili and hisse_kodu not in fiyat_gosterildi:
+                            price_result = await fetch_price_only(client, hisse_kodu, status_callback)
+                            all_message_ids_to_delete.extend(price_result.get("ids", []))
+                            if "price_info" in price_result:
+                                socketio.emit('new_data', {
+                                    'type': 'price_only',
+                                    'hisse': hisse_kodu,
+                                    'data': price_result
+                                })
+                                fiyat_gosterildi.add(hisse_kodu)
 
-    # Async mantığı çalıştır
-    asyncio.run(main_async_logic())
+                        for zaman in takas_secilenler:
+                            result = await fetch_data(client, hisse_kodu, zaman, 'takas', status_callback)
+                            all_message_ids_to_delete.extend(result.get("ids", []))
+                            title = f"{hisse_kodu} {zaman} TAKAS VERİLERİ"
+                            socketio.emit('new_data', {
+                                'type': 'table',
+                                'data_type': 'takas',
+                                'period': zaman,
+                                'title': title,
+                                'result_data': result,
+                                'price_info': None
+                            })
 
-    # --- GEÇMİŞE EKLEME (DEĞİŞMEDİ) ---
-    # get_results_as_text() fonksiyonu artık yok, bu yüzden 'full_text_output' geçici olarak boş.
-    # Bu özellik (geçmişten tam metin okuma) web'de yeniden tasarlanmalı.
-    history_entry = {
-        "timestamp": datetime.datetime.now(),
-        "parameters": params,  # 'params' dict'ini doğrudan kaydediyoruz
-        "structured_data": current_query_results,
-        "full_text_output": "Web'den kaydedildi - Metin çıktısı devrede dışı."
-    }
-    add_to_history(history_entry)
-    # --- BİTTİ ---
+                if all_message_ids_to_delete:
+                    socketio.emit('status_update', {'msg': 'Sohbet geçmişi temizleniyor...', 'color': 'gray'})
+                    unique_ids = list(set(all_message_ids_to_delete))
+                    await client.delete_messages(bot_username, unique_ids, revoke=True)
+
+        except Exception as e:
+            print(f"Telegram Hatası: {e}")
+            status_callback(f"Telegram Hatası: {e}")
+
+
+    # Ana thread'de asyncio.run() çalıştırmak yerine,
+    # socketio'nun kendi thread'inde çalıştırmak daha iyidir.
+    # Ama bu, 'run_fetch_logic'i 'socketio.start_background_task' ile çağırdığımız
+    # için zaten yeni bir thread'de çalışıyor.
+    try:
+        asyncio.run(main_async_logic())
+    except Exception as e:
+        print(f"Asyncio Hatası: {e}")
+        status_callback(f"Sunucu Hatası: {e}")
 
     toplam_bitis = time.time()
     toplam_sure = toplam_bitis - toplam_baslangic
 
-    # İşlemin bittiğini web'e bildir
     socketio.emit('fetch_complete', {
         'status_msg': 'Tüm işlemler tamamlandı.',
         'duration_msg': f'Toplam süre: {toplam_sure:.2f} saniye'
     })
 
-
-# --- YENİ: FLASK VE SOCKETIO ROTALARI ---
+# --- YENİ: WEB SAYFASI ROTALARI (ROUTES) ---
 
 @app.route('/')
+@ip_whitelist_required  # Bu satır, IP KONTROLÜNÜN burada yapıldığını söyler
 def index():
-    """Ana sayfayı (index.html) sunar."""
-    # 'Hoşgeldin Musab' ekranı (SplashScreen) burada yok.
-    # HTML sayfası kendi "yükleniyor" animasyonunu içerecek.
+    """Ana hisse senedi aracını sunar (index.html)."""
+    # @ip_whitelist_required sayesinde, buraya sadece izinli IP'ler ulaşabilir.
     return render_template('index.html')
 
+@app.route('/request-access', methods=['GET', 'POST'])
+def request_access():
+    """İstek gönderme sayfası ve mantığı."""
+    user_ip = get_user_ip()
+
+    if request.method == 'POST':
+        # Kullanıcı "İstek Gönder" butonuna bastı
+        existing_ip = AllowedIP.query.filter_by(ip_address=user_ip).first()
+        if not existing_ip:
+            # IP daha önce hiç istek atmamışsa, 'pending' olarak ekle
+            new_request = AllowedIP(ip_address=user_ip, status='pending', timestamp=datetime.datetime.utcnow())
+            db.session.add(new_request)
+            db.session.commit()
+            return render_template('reject.html', user_ip=user_ip, message="İsteğiniz başarıyla alındı. Yönetici onayı bekleniyor.")
+        elif existing_ip.status == 'blocked':
+             return render_template('reject.html', user_ip=user_ip, message="IP adresiniz yönetici tarafından engellenmiştir.")
+        else:
+            # 'pending' veya 'accepted' ise
+            return render_template('reject.html', user_ip=user_ip, message="Zaten bir isteğiniz var veya IP'niz zaten kabul edilmiş.")
+
+    # Eğer sayfa sadece açıldıysa (GET request)
+    return render_template('reject.html', user_ip=user_ip)
+
+# --- YENİ: YÖNETİCİ PANELİ ROTALARI ---
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Yönetici giriş sayfası (login.html)."""
+    if current_user.is_authenticated:
+        return redirect(url_for('admin_panel'))
+
+    if request.method == 'POST':
+        password = request.form['password']
+        # Yöneticiyi her zaman 'musab' olarak ara
+        admin_user = Admin.query.filter_by(username='musab').first()
+
+        if admin_user and admin_user.check_password(password):
+            # Şifre doğruysa (şifre: kaan)
+            login_user(admin_user)
+            session.permanent = True # Oturumu kalıcı yap (tarayıcı kapanınca gitmesin)
+            app.permanent_session_lifetime = datetime.timedelta(days=30) # 30 gün açık kalsın
+            return redirect(url_for('admin_panel'))
+        else:
+            # Şifre yanlışsa
+            return render_template('login.html', error="Geçersiz şifre.")
+
+    return render_template('login.html')
+
+@app.route('/logout')
+@login_required # Sadece giriş yapanlar çıkış yapabilir
+def logout():
+    logout_user()
+    return redirect(url_for('login'))
+
+@app.route('/admin')
+@login_required # Bu sayfayı sadece şifreyi bilenler görebilir
+def admin_panel():
+    """Yönetici panelini (admin.html) gösterir."""
+    pending_ips = AllowedIP.query.filter_by(status='pending').order_by(AllowedIP.timestamp.desc()).all()
+    accepted_ips = AllowedIP.query.filter_by(status='accepted').order_by(AllowedIP.ip_address).all()
+    blocked_ips = AllowedIP.query.filter_by(status='blocked').order_by(AllowedIP.ip_address).all()
+
+    return render_template('admin.html',
+                           pending=pending_ips,
+                           accepted=accepted_ips,
+                           blocked=blocked_ips)
+
+@app.route('/admin/handle-request', methods=['POST'])
+@login_required
+def handle_request():
+    """Bekleyen istekleri (Kabul Et, Reddet, Engelle) işler."""
+    ip_addr = request.form['ip']
+    action = request.form['action']
+
+    ip_entry = AllowedIP.query.filter_by(ip_address=ip_addr).first() # 'pending' olması şart değil
+    if not ip_entry:
+        abort(404) # İstek bulunamadı
+
+    if action == 'accept':
+        ip_entry.status = 'accepted'
+        ip_entry.timestamp = datetime.datetime.utcnow()
+    elif action == 'block':
+        ip_entry.status = 'blocked'
+        ip_entry.timestamp = datetime.datetime.utcnow()
+    elif action == 'reject':
+        # Reddetmek, sadece kaydı silmektir, böylece tekrar deneyebilir
+        db.session.delete(ip_entry)
+
+    db.session.commit()
+    return redirect(url_for('admin_panel'))
+
+@app.route('/admin/manual-add', methods=['POST'])
+@login_required
+def manual_add():
+    """Yöneticinin manuel IP eklemesini sağlar."""
+    ip_addr = request.form['ip'].strip()
+    if not ip_addr:
+        return redirect(url_for('admin_panel'))
+
+    existing_ip = AllowedIP.query.filter_by(ip_address=ip_addr).first()
+
+    if existing_ip:
+        # Eğer IP zaten varsa, durumunu 'accepted' yap
+        existing_ip.status = 'accepted'
+        existing_ip.timestamp = datetime.datetime.utcnow()
+    else:
+        # IP yepyeni ise, 'accepted' olarak ekle
+        new_ip = AllowedIP(ip_address=ip_addr, status='accepted', timestamp=datetime.datetime.utcnow())
+        db.session.add(new_ip)
+
+    db.session.commit()
+    return redirect(url_for('admin_panel'))
+
+@app.route('/admin/remove-accepted', methods=['POST'])
+@login_required
+def remove_accepted():
+    ip_addr = request.form['ip']
+    ip_entry = AllowedIP.query.filter_by(ip_address=ip_addr, status='accepted').first()
+    if ip_entry:
+        db.session.delete(ip_entry) # Kaydı siler (artık izinli değil)
+        db.session.commit()
+    return redirect(url_for('admin_panel'))
+
+@app.route('/admin/unblock', methods=['POST'])
+@login_required
+def unblock():
+    ip_addr = request.form['ip']
+    ip_entry = AllowedIP.query.filter_by(ip_address=ip_addr, status='blocked').first()
+    if ip_entry:
+        db.session.delete(ip_entry) # Kaydı siler (engel kalkar)
+        db.session.commit()
+    return redirect(url_for('admin_panel'))
+
+
+# --- YENİ: SOCKETIO (Veri Çekme) ROTALARI ---
 
 @socketio.on('connect')
+@ip_whitelist_required # Socket bağlantısını da kontrol et
 def handle_connect():
-    """Bir kullanıcı web sitesine bağlandığında tetiklenir."""
-    print('Bir istemci bağlandı')
-    # Program başlarken geçmişi diskten yükle
-    load_history()
-
+    # IP kontrolü zaten @ip_whitelist_required tarafından yapıldı.
+    # Eğer buraya bağlandılarsa, izinlilerdir.
+    print(f'İzin verilen istemci ({g.user_ip}) bağlandı')
 
 @socketio.on('start_fetch')
+@ip_whitelist_required # Veri çekme isteğini de kontrol et
 def handle_start_fetch(data):
-    """
-    Kullanıcı web sayfasındaki 'Verileri Getir' butonuna tıkladığında
-    JavaScript'ten bu 'start_fetch' olayı tetiklenir.
-    'data' içinde hisse listesi ve seçenekler bulunur.
-    """
-
-    # Gelen veriyi (string listesi) işle
     hisse_input = data.get('hisse_input', '')
     hisse_listesi = [h.strip().upper() for h in hisse_input.split(',') if h.strip()]
 
-    # Arama parametrelerini bir dict'te topla
     query_params = {
         "hisse_listesi_str": hisse_input,
         "hisse_listesi": hisse_listesi,
@@ -420,18 +563,15 @@ def handle_start_fetch(data):
         "fiyat_secili": data.get("fiyat_secili", False)
     }
 
-    # Uzun süren veri çekme işini ana thread'i kilitlememek için
-    # bir arka plan görevinde (thread) başlat.
+    # Arka planda çalıştır
     socketio.start_background_task(target=run_fetch_logic, params=query_params)
 
 
 # --- Sunucuyu Başlatma ---
-# --- Sunucuyu Başlatma (Render için ayarlandı) ---
 if __name__ == '__main__':
-    bot_username = os.environ.get('BOT_USERNAME')
-    # Render, 'PORT' adında bir çevre değişkeni sağlar
+    # İlk çalıştırmada veritabanını ve admin'i oluştur
+    create_first_admin()
+
     port = int(os.environ.get('PORT', 5000))
-    # 'debug=True' sunucuda kapalı olmalı
-    # 'host='0.0.0.0'' tüm IP'lerden gelen bağlantıları kabul eder (Render için şart)
     print(f"Sunucu http://0.0.0.0:{port} adresinde başlatılıyor...")
     socketio.run(app, debug=False, host='0.0.0.0', port=port, allow_unsafe_werkzeug=True)
