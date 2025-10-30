@@ -24,6 +24,7 @@ session_string = os.environ.get('TELETHON_SESSION')
 bot_username = os.environ.get('BOT_USERNAME')
 
 # --- YENİ: VERİTABANI BAĞLANTISI ---
+# Render'dan (Neon) gelen gizli adresi kullanır
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
 # --- Flask ve SocketIO Kurulumu ---
@@ -39,11 +40,12 @@ db = SQLAlchemy(app)
 # YENİ: Giriş (Login) Yöneticisi
 login_manager = LoginManager()
 login_manager.init_app(app)
-login_manager.login_view = 'login' # Giriş yapılmamışsa '/login'e yönlendir
+login_manager.login_view = 'login'  # Giriş yapılmamışsa '/login'e yönlendir
 login_manager.login_message = "Lütfen yönetici panelini görmek için giriş yapın."
-login_manager.session_protection = "strong"
+login_manager.session_protection = "strong"  # Oturum güvenliği
 
 socketio = SocketIO(app)
+
 
 # --- YENİ: YÖNETİCİ GİRİŞ MODELİ ---
 class Admin(UserMixin, db.Model):
@@ -57,34 +59,45 @@ class Admin(UserMixin, db.Model):
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
 
+
 @login_manager.user_loader
 def load_user(user_id):
     try:
-        return db.session.get(Admin, int(user_id))
+        # Veritabanı hazır olmayabilir, bu yüzden 'with app.app_context()' ekleyelim
+        with app.app_context():
+            return db.session.get(Admin, int(user_id))
     except Exception as e:
         print(f"load_user error: {e}")
         return None
+
 
 # --- YENİ: IP İZİN MODELİ ---
 class AllowedIP(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     ip_address = db.Column(db.String(50), unique=True, nullable=False)
-    status = db.Column(db.String(20), nullable=False) # 'accepted', 'blocked', 'pending'
+    status = db.Column(db.String(20), nullable=False)  # 'accepted', 'blocked', 'pending'
     timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+
 
 # --- YENİ: İLK YÖNETİCİYİ OLUŞTURMA ---
 def create_first_admin():
-    with app.app_context():
-        db.create_all() # Tüm tabloları oluştur
-        if not Admin.query.filter_by(username='musab').first():
-            print("İlk yönetici (musab) oluşturuluyor...")
-            admin_user = Admin(username='musab')
-            admin_user.set_password('kaan') # Şifre: kaan
-            db.session.add(admin_user)
-            db.session.commit()
-            print("Yönetici oluşturuldu.")
-        else:
-            print("Yönetici zaten mevcut.")
+    try:
+        with app.app_context():
+            db.create_all()  # Tüm tabloları oluştur
+            if not Admin.query.filter_by(username='musab').first():
+                print("İlk yönetici (musab) oluşturuluyor...")
+                admin_user = Admin(username='musab')
+                admin_user.set_password('kaan')  # Şifre: kaan
+                db.session.add(admin_user)
+                db.session.commit()
+                print("Yönetici oluşturuldu.")
+            else:
+                print("Yönetici zaten mevcut.")
+    except Exception as e:
+        print(f"Veritabanı veya yönetici oluşturulurken hata oluştu: {e}")
+        # Bu hata, sunucunun henüz veritabanına bağlanamadığını gösterebilir
+        # Render'ın 'DATABASE_URL' değişkenini alması biraz zaman alabilir.
+
 
 # --- YENİ: IP KONTROL SİSTEMİ (ÇOK ÖNEMLİ) ---
 def get_user_ip():
@@ -93,39 +106,46 @@ def get_user_ip():
         return request.headers['X-Forwarded-For'].split(',')[0].strip()
     return request.remote_addr
 
+
 # Bu 'decorator', bir sayfayı çağırmadan önce IP'yi kontrol eder
 def ip_whitelist_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         user_ip = get_user_ip()
+        g.user_ip = user_ip  # IP'yi global 'g' objesine kaydet
 
-        # 1. Kendi IP'mizi (Yönetici) her zaman izin ver
-        # (Bu, kendimizi kilitlememek için bir güvenlik önlemi)
-        # Şimdilik, admin girişi yaptıysa izin vereceğiz.
+        # 1. Yönetici giriş yapmışsa, her zaman izin ver
         if current_user.is_authenticated:
-            g.user_ip = user_ip # IP'yi global 'g' objesine kaydet
             return f(*args, **kwargs)
 
-        # 2. Veritabanından IP'yi kontrol et
-        ip_entry = AllowedIP.query.filter_by(ip_address=user_ip).first()
+        try:
+            # 2. Veritabanından IP'yi kontrol et
+            ip_entry = AllowedIP.query.filter_by(ip_address=user_ip).first()
 
-        if ip_entry and ip_entry.status == 'accepted':
-            # IP "kabul edilmiş" listesindeyse, siteye izin ver
-            g.user_ip = user_ip # IP'yi global 'g' objesine kaydet
-            return f(*args, **kwargs)
+            if ip_entry and ip_entry.status == 'accepted':
+                # IP "kabul edilmiş" listesindeyse, siteye izin ver
+                return f(*args, **kwargs)
 
-        # 3. IP "engellenmiş" listesindeyse
-        if ip_entry and ip_entry.status == 'blocked':
-            return render_template('reject.html', user_ip=user_ip, message="IP adresiniz yönetici tarafından engellenmiştir.")
+            # 3. IP "engellenmiş" listesindeyse
+            if ip_entry and ip_entry.status == 'blocked':
+                return render_template('reject.html', user_ip=user_ip,
+                                       message="IP adresiniz yönetici tarafından engellenmiştir.")
 
-        # 4. IP "beklemede" ise
-        if ip_entry and ip_entry.status == 'pending':
-            return render_template('reject.html', user_ip=user_ip, message="İsteğiniz zaten gönderildi, beklemede.")
+            # 4. IP "beklemede" ise
+            if ip_entry and ip_entry.status == 'pending':
+                return render_template('reject.html', user_ip=user_ip, message="İsteğiniz zaten gönderildi, beklemede.")
 
-        # 5. IP listede hiç yoksa
-        return render_template('reject.html', user_ip=user_ip)
+            # 5. IP listede hiç yoksa
+            return render_template('reject.html', user_ip=user_ip)
+
+        except Exception as e:
+            # Bu hata, veritabanı (Neon) henüz uyanmadıysa veya bağlı değilse olur.
+            print(f"IP KONTROL HATASI (Veritabanı uyanıyor olabilir): {e}")
+            return render_template('reject.html', user_ip=user_ip,
+                                   message="Veritabanı hatası. Lütfen 1 dakika sonra tekrar deneyin.")
 
     return decorated_function
+
 
 # --- ESKİ VERİ ÇEKME KODU (DEĞİŞMEDİ) ---
 # (Tüm fetch_data, fetch_price_only, fetch_depth_data fonksiyonları)
@@ -139,7 +159,7 @@ async def fetch_data(client, hisse_kodu, zaman_araligi, data_type, status_callba
         butonlu_mesaj = None
         for i in range(120):
             status_callback(f"({hisse_kodu}) {zaman_araligi} için botun cevabı bekleniyor{'.' * (i % 4)}")
-            await asyncio.sleep(0.25) # time.sleep yerine asyncio.sleep
+            await asyncio.sleep(0.25)  # time.sleep yerine asyncio.sleep
             messages = await client.get_messages(bot_username, limit=1)
             if messages and messages[0].id > son_gonderilen_mesaj.id and messages[0].reply_markup:
                 butonlu_mesaj = messages[0];
@@ -151,7 +171,7 @@ async def fetch_data(client, hisse_kodu, zaman_araligi, data_type, status_callba
         veri_mesaji = None
         for i in range(120):
             status_callback(f"({hisse_kodu}) {zaman_araligi} verisi bekleniyor{'.' * (i % 4)}")
-            await asyncio.sleep(0.25) # time.sleep yerine asyncio.sleep
+            await asyncio.sleep(0.25)  # time.sleep yerine asyncio.sleep
             latest_message = (await client.get_messages(bot_username, limit=1))[0]
             if latest_message.id > butonlu_mesaj.id or (
                     latest_message.id == butonlu_mesaj.id and latest_message.text != orjinal_metin):
@@ -192,6 +212,7 @@ async def fetch_data(client, hisse_kodu, zaman_araligi, data_type, status_callba
     except Exception as e:
         return {"hata": f"Bir hata oluştu: {e}", "ids": message_ids}
 
+
 async def fetch_price_only(client, hisse_kodu, status_callback):
     result = await fetch_data(client, hisse_kodu, "Günlük", "akd", status_callback)
     price_info = result.get("price_info", "Alınamadı")
@@ -199,6 +220,7 @@ async def fetch_price_only(client, hisse_kodu, status_callback):
             "ids": result.get("ids", []),
             "price_info": f"{hisse_kodu.upper()} Güncel Fiyat: {price_info}",
             "is_price_only": True}
+
 
 async def fetch_depth_data(client, hisse_kodu, status_callback):
     message_ids = []
@@ -209,7 +231,7 @@ async def fetch_depth_data(client, hisse_kodu, status_callback):
         ilk_yanit_mesaji = None
         for i in range(120):
             status_callback(f"({hisse_kodu}) Derinlik bekleniyor{'.' * (i % 4)}")
-            await asyncio.sleep(0.25) # time.sleep yerine asyncio.sleep
+            await asyncio.sleep(0.25)  # time.sleep yerine asyncio.sleep
             messages = await client.get_messages(bot_username, limit=1)
             if messages and messages[0].id > son_gonderilen_mesaj.id:
                 ilk_yanit_mesaji = messages[0];
@@ -224,7 +246,7 @@ async def fetch_depth_data(client, hisse_kodu, status_callback):
         else:
             for i in range(120):
                 status_callback(f"({hisse_kodu}) Veri bekleniyor{'.' * (i % 4)}")
-                await asyncio.sleep(0.25) # time.sleep yerine asyncio.sleep
+                await asyncio.sleep(0.25)  # time.sleep yerine asyncio.sleep
                 latest_message = (await client.get_messages(bot_username, limit=1))[0]
                 if latest_message.id > ilk_yanit_mesaji.id or (
                         latest_message.id == ilk_yanit_mesaji.id and latest_message.text != orjinal_metin):
@@ -263,39 +285,27 @@ async def fetch_depth_data(client, hisse_kodu, status_callback):
 
 # Async iş parçacığı (değişmedi)
 def run_fetch_logic(params):
-
-    # ... (TÜM run_fetch_logic KODU BURADA, KISALTILDI) ...
-    # (Sadece 'async with' satırını güncelledik)
-    hisse_listesi = params.get("hisse_listesi", [])
-    fiyat_secili = params.get("fiyat_secili", False)
-    akd_secilenler = params.get("akd_secilenler", [])
-    takas_secilenler = params.get("takas_secilenler", [])
-    derinlik_secili = params.get("derinlik_secili", False)
-
-    if not hisse_listesi:
-        socketio.emit('status_update', {'msg': 'Hata: Hisse listesi boş.', 'color': 'red'})
-        return
-
-    toplam_baslangic = time.time()
-    all_message_ids_to_delete = []
-
-    # Bu callback, artık 'asyncio.run' içinden çağrıldığı için
-    # doğrudan socketio.emit kullanamaz, ana thread'e göndermesi lazım.
-    # Kolay çözüm: socketio.emit'i 'run_fetch_logic' dışından çağırmak.
-    # Şimdilik, socketio.emit'in thread-safe olduğunu varsayıyoruz (ki öyle olmalı).
     def status_callback(msg):
         socketio.emit('status_update', {'msg': msg, 'color': 'gray'})
 
     async def main_async_logic():
         # YENİ: StringSession kullan
-        if not api_id or not api_hash or not session_string or not bot_username:
+        if not all([api_id, api_hash, session_string, bot_username]):
             print("HATA: Gizli değişkenler (API_ID, API_HASH, TELETHON_SESSION, BOT_USERNAME) eksik.")
             status_callback("Sunucu hatası: Lütfen yöneticiyle iletişime geçin.")
             return
 
         try:
             async with TelegramClient(StringSession(session_string), api_id, api_hash) as client:
+                hisse_listesi = params.get("hisse_listesi", [])
+                fiyat_secili = params.get("fiyat_secili", False)
+                akd_secilenler = params.get("akd_secilenler", [])
+                takas_secilenler = params.get("takas_secilenler", [])
+                derinlik_secili = params.get("derinlik_secili", False)
+
                 fiyat_gosterildi = set()
+                all_message_ids_to_delete = []
+
                 for i, hisse_kodu in enumerate(hisse_listesi):
                     if i > 0:
                         socketio.emit('new_separator')
@@ -328,7 +338,7 @@ def run_fetch_logic(params):
                             result = await fetch_data(client, hisse_kodu, zaman, 'akd', status_callback)
                             all_message_ids_to_delete.extend(result.get("ids", []))
                             price_info_to_display = result.get("price_info") if (
-                                                                                            fiyat_secili or zaman == 'Günlük') and hisse_kodu not in fiyat_gosterildi else None
+                                                                                        fiyat_secili or zaman == 'Günlük') and hisse_kodu not in fiyat_gosterildi else None
                             if price_info_to_display: fiyat_gosterildi.add(hisse_kodu)
                             title = f"{hisse_kodu} {zaman} AKD VERİLERİ"
                             socketio.emit('new_data', {
@@ -377,16 +387,13 @@ def run_fetch_logic(params):
             print(f"Telegram Hatası: {e}")
             status_callback(f"Telegram Hatası: {e}")
 
-
-    # Ana thread'de asyncio.run() çalıştırmak yerine,
-    # socketio'nun kendi thread'inde çalıştırmak daha iyidir.
-    # Ama bu, 'run_fetch_logic'i 'socketio.start_background_task' ile çağırdığımız
-    # için zaten yeni bir thread'de çalışıyor.
+    # Ana async iş mantığını çalıştır
+    toplam_baslangic = time.time()
     try:
         asyncio.run(main_async_logic())
     except Exception as e:
         print(f"Asyncio Hatası: {e}")
-        status_callback(f"Sunucu Hatası: {e}")
+        socketio.emit('status_update', {'msg': f"Sunucu Hatası: {e}", 'color': 'red'})
 
     toplam_bitis = time.time()
     toplam_sure = toplam_bitis - toplam_baslangic
@@ -396,6 +403,7 @@ def run_fetch_logic(params):
         'duration_msg': f'Toplam süre: {toplam_sure:.2f} saniye'
     })
 
+
 # --- YENİ: WEB SAYFASI ROTALARI (ROUTES) ---
 
 @app.route('/')
@@ -404,6 +412,7 @@ def index():
     """Ana hisse senedi aracını sunar (index.html)."""
     # @ip_whitelist_required sayesinde, buraya sadece izinli IP'ler ulaşabilir.
     return render_template('index.html')
+
 
 @app.route('/request-access', methods=['GET', 'POST'])
 def request_access():
@@ -418,15 +427,19 @@ def request_access():
             new_request = AllowedIP(ip_address=user_ip, status='pending', timestamp=datetime.datetime.utcnow())
             db.session.add(new_request)
             db.session.commit()
-            return render_template('reject.html', user_ip=user_ip, message="İsteğiniz başarıyla alındı. Yönetici onayı bekleniyor.")
+            return render_template('reject.html', user_ip=user_ip,
+                                   message="İsteğiniz başarıyla alındı. Yönetici onayı bekleniyor.")
         elif existing_ip.status == 'blocked':
-             return render_template('reject.html', user_ip=user_ip, message="IP adresiniz yönetici tarafından engellenmiştir.")
+            return render_template('reject.html', user_ip=user_ip,
+                                   message="IP adresiniz yönetici tarafından engellenmiştir.")
         else:
             # 'pending' veya 'accepted' ise
-            return render_template('reject.html', user_ip=user_ip, message="Zaten bir isteğiniz var veya IP'niz zaten kabul edilmiş.")
+            return render_template('reject.html', user_ip=user_ip,
+                                   message="Zaten bir isteğiniz var veya IP'niz zaten kabul edilmiş.")
 
     # Eğer sayfa sadece açıldıysa (GET request)
     return render_template('reject.html', user_ip=user_ip)
+
 
 # --- YENİ: YÖNETİCİ PANELİ ROTALARI ---
 
@@ -444,8 +457,8 @@ def login():
         if admin_user and admin_user.check_password(password):
             # Şifre doğruysa (şifre: kaan)
             login_user(admin_user)
-            session.permanent = True # Oturumu kalıcı yap (tarayıcı kapanınca gitmesin)
-            app.permanent_session_lifetime = datetime.timedelta(days=30) # 30 gün açık kalsın
+            session.permanent = True  # Oturumu kalıcı yap (tarayıcı kapanınca gitmesin)
+            app.permanent_session_lifetime = datetime.timedelta(days=30)  # 30 gün açık kalsın
             return redirect(url_for('admin_panel'))
         else:
             # Şifre yanlışsa
@@ -453,14 +466,16 @@ def login():
 
     return render_template('login.html')
 
+
 @app.route('/logout')
-@login_required # Sadece giriş yapanlar çıkış yapabilir
+@login_required  # Sadece giriş yapanlar çıkış yapabilir
 def logout():
     logout_user()
     return redirect(url_for('login'))
 
+
 @app.route('/admin')
-@login_required # Bu sayfayı sadece şifreyi bilenler görebilir
+@login_required  # Bu sayfayı sadece şifreyi bilenler görebilir
 def admin_panel():
     """Yönetici panelini (admin.html) gösterir."""
     pending_ips = AllowedIP.query.filter_by(status='pending').order_by(AllowedIP.timestamp.desc()).all()
@@ -472,6 +487,7 @@ def admin_panel():
                            accepted=accepted_ips,
                            blocked=blocked_ips)
 
+
 @app.route('/admin/handle-request', methods=['POST'])
 @login_required
 def handle_request():
@@ -479,9 +495,9 @@ def handle_request():
     ip_addr = request.form['ip']
     action = request.form['action']
 
-    ip_entry = AllowedIP.query.filter_by(ip_address=ip_addr).first() # 'pending' olması şart değil
+    ip_entry = AllowedIP.query.filter_by(ip_address=ip_addr).first()
     if not ip_entry:
-        abort(404) # İstek bulunamadı
+        abort(404)  # İstek bulunamadı
 
     if action == 'accept':
         ip_entry.status = 'accepted'
@@ -495,6 +511,7 @@ def handle_request():
 
     db.session.commit()
     return redirect(url_for('admin_panel'))
+
 
 @app.route('/admin/manual-add', methods=['POST'])
 @login_required
@@ -518,15 +535,17 @@ def manual_add():
     db.session.commit()
     return redirect(url_for('admin_panel'))
 
+
 @app.route('/admin/remove-accepted', methods=['POST'])
 @login_required
 def remove_accepted():
     ip_addr = request.form['ip']
     ip_entry = AllowedIP.query.filter_by(ip_address=ip_addr, status='accepted').first()
     if ip_entry:
-        db.session.delete(ip_entry) # Kaydı siler (artık izinli değil)
+        db.session.delete(ip_entry)  # Kaydı siler (artık izinli değil)
         db.session.commit()
     return redirect(url_for('admin_panel'))
+
 
 @app.route('/admin/unblock', methods=['POST'])
 @login_required
@@ -534,7 +553,7 @@ def unblock():
     ip_addr = request.form['ip']
     ip_entry = AllowedIP.query.filter_by(ip_address=ip_addr, status='blocked').first()
     if ip_entry:
-        db.session.delete(ip_entry) # Kaydı siler (engel kalkar)
+        db.session.delete(ip_entry)  # Kaydı siler (engel kalkar)
         db.session.commit()
     return redirect(url_for('admin_panel'))
 
@@ -542,14 +561,15 @@ def unblock():
 # --- YENİ: SOCKETIO (Veri Çekme) ROTALARI ---
 
 @socketio.on('connect')
-@ip_whitelist_required # Socket bağlantısını da kontrol et
+@ip_whitelist_required  # Socket bağlantısını da kontrol et
 def handle_connect():
     # IP kontrolü zaten @ip_whitelist_required tarafından yapıldı.
     # Eğer buraya bağlandılarsa, izinlilerdir.
     print(f'İzin verilen istemci ({g.user_ip}) bağlandı')
 
+
 @socketio.on('start_fetch')
-@ip_whitelist_required # Veri çekme isteğini de kontrol et
+@ip_whitelist_required  # Veri çekme isteğini de kontrol et
 def handle_start_fetch(data):
     hisse_input = data.get('hisse_input', '')
     hisse_listesi = [h.strip().upper() for h in hisse_input.split(',') if h.strip()]
@@ -570,7 +590,9 @@ def handle_start_fetch(data):
 # --- Sunucuyu Başlatma ---
 if __name__ == '__main__':
     # İlk çalıştırmada veritabanını ve admin'i oluştur
-    create_first_admin()
+    # Bunu app.app_context() içinde yapmak daha güvenli
+    with app.app_context():
+        create_first_admin()
 
     port = int(os.environ.get('PORT', 5000))
     print(f"Sunucu http://0.0.0.0:{port} adresinde başlatılıyor...")
